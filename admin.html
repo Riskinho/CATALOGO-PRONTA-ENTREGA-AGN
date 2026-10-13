@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Painel do estoque</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;600&family=Barlow+Condensed:wght@600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- LOGIN -->
+  <main id="login" class="login-box" hidden>
+    <h1>Painel do estoque</h1>
+    <form id="login-form">
+      <label class="field"><span>E-mail</span><input id="l-email" type="email" required autocomplete="username"></label>
+      <label class="field"><span>Senha</span><input id="l-pass" type="password" required autocomplete="current-password"></label>
+      <div id="login-error" class="notice err" hidden></div>
+      <button class="btn primary" type="submit" style="width:100%">Entrar</button>
+    </form>
+  </main>
+
+  <!-- PAINEL -->
+  <div id="panel" hidden>
+    <header class="topbar">
+      <div class="topbar-in">
+        <h1>Painel do estoque</h1>
+        <a class="btn" href="index.html" style="text-decoration:none">Ver catálogo</a>
+        <button id="logout" class="btn" type="button">Sair</button>
+      </div>
+    </header>
+    <main class="wrap">
+      <div class="tools">
+        <input id="q" class="search" type="search" placeholder="Buscar por nome ou código" aria-label="Buscar itens" style="flex:1">
+        <button id="new" class="btn primary" type="button">Novo item</button>
+      </div>
+      <p id="count" class="count"></p>
+      <div id="list"></div>
+      <p id="empty" class="empty" hidden>Nenhum item cadastrado. Use “Novo item” para começar.</p>
+    </main>
+  </div>
+
+  <!-- FORMULÁRIO DE ITEM -->
+  <dialog id="dlg">
+    <form id="item-form">
+      <h2 id="dlg-title">Novo item</h2>
+      <div class="two">
+        <label class="field"><span>Nome</span><input id="f-name" required maxlength="160"></label>
+        <label class="field"><span>Código</span><input id="f-code" required maxlength="60"></label>
+      </div>
+      <label class="field"><span>Descrição</span><textarea id="f-desc"></textarea></label>
+      <label class="field" style="max-width:160px"><span>Quantidade em estoque</span><input id="f-stock" type="number" min="0" step="1" value="0" required></label>
+      <label class="field"><span>Foto</span><input id="f-photo" type="file" accept="image/*"></label>
+      <img id="f-preview" class="preview" alt="Prévia da foto" hidden>
+      <p class="hint">A foto é reduzida automaticamente para economizar espaço.</p>
+      <div id="f-error" class="notice err" hidden></div>
+      <div class="dlg-actions">
+        <button id="cancel" class="btn" type="button">Cancelar</button>
+        <button id="save" class="btn primary" type="submit">Salvar item</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+  <script src="config.js"></script>
+  <script>
+    const C = window.CONFIG;
+    const $ = (id) => document.getElementById(id);
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const sb = supabase.createClient(C.SUPABASE_URL, C.SUPABASE_ANON_KEY);
+    const BUCKET = 'produtos';
+
+    let products = [];
+    let editing = null; // produto em edição (null = novo)
+
+    let toastTimer;
+    function toast(msg) {
+      const t = $('toast'); t.textContent = msg; t.classList.add('show');
+      clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2000);
+    }
+
+    /* ---------- sessão ---------- */
+    async function showBysession() {
+      const { data } = await sb.auth.getSession();
+      const logged = !!data.session;
+      $('login').hidden = logged;
+      $('panel').hidden = !logged;
+      if (logged) await load();
+    }
+
+    $('login-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      $('login-error').hidden = true;
+      const { error } = await sb.auth.signInWithPassword({ email: $('l-email').value.trim(), password: $('l-pass').value });
+      if (error) { $('login-error').textContent = 'E-mail ou senha incorretos.'; $('login-error').hidden = false; return; }
+      $('l-pass').value = '';
+      showBysession();
+    });
+
+    $('logout').onclick = async () => { await sb.auth.signOut(); showBysession(); };
+
+    /* ---------- lista ---------- */
+    async function load() {
+      const { data, error } = await sb.from('products').select('*').order('name');
+      if (error) { toast('Erro ao carregar: ' + error.message); return; }
+      products = data; render();
+    }
+
+    function render() {
+      const q = $('q').value.trim().toLowerCase();
+      const list = products.filter((p) => !q || `${p.name} ${p.code}`.toLowerCase().includes(q));
+      $('count').textContent = `${list.length} de ${products.length} itens`;
+      $('empty').hidden = products.length > 0;
+      $('list').innerHTML = list.map((p) => `
+        <div class="row" data-id="${esc(p.id)}">
+          <div class="thumb">${p.image_url ? `<img src="${esc(p.image_url)}" alt="">` : ''}</div>
+          <div class="info"><strong>${esc(p.name)}</strong><span class="code">Cód. ${esc(p.code)}</span></div>
+          <div class="qty stock ${p.stock === 0 ? 'zero' : ''}">
+            <button type="button" data-act="dec" aria-label="Diminuir estoque">−</button>
+            <input type="number" min="0" step="1" value="${p.stock}" data-act="stock" aria-label="Estoque de ${esc(p.name)}">
+            <button type="button" data-act="inc" aria-label="Aumentar estoque">+</button>
+          </div>
+          <div class="actions">
+            <button class="btn small" type="button" data-act="edit">Editar</button>
+            <button class="btn small danger" type="button" data-act="del">Remover</button>
+          </div>
+        </div>`).join('');
+    }
+
+    $('q').addEventListener('input', render);
+
+    async function saveStock(id, value) {
+      const stock = Math.max(0, parseInt(value, 10) || 0);
+      const { error } = await sb.from('products').update({ stock }).eq('id', id);
+      if (error) { toast('Erro ao salvar: ' + error.message); await load(); return; }
+      products.find((p) => p.id === id).stock = stock;
+      render(); toast('Estoque salvo');
+    }
+
+    $('list').addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-act]'); if (!btn) return;
+      const row = btn.closest('.row'); const id = row.dataset.id;
+      const p = products.find((x) => x.id === id);
+      const input = row.querySelector('input');
+      if (btn.dataset.act === 'inc') saveStock(id, p.stock + 1);
+      if (btn.dataset.act === 'dec') saveStock(id, p.stock - 1);
+      if (btn.dataset.act === 'edit') openForm(p);
+      if (btn.dataset.act === 'del') {
+        if (!confirm(`Remover “${p.name}” (Cód. ${p.code})? Essa ação não pode ser desfeita.`)) return;
+        const { error } = await sb.from('products').delete().eq('id', id);
+        if (error) return toast('Erro ao remover: ' + error.message);
+        if (p.image_path) await sb.storage.from(BUCKET).remove([p.image_path]);
+        products = products.filter((x) => x.id !== id); render(); toast('Item removido');
+      }
+    });
+    $('list').addEventListener('change', (e) => {
+      if (e.target.dataset.act === 'stock') saveStock(e.target.closest('.row').dataset.id, e.target.value);
+    });
+
+    /* ---------- formulário ---------- */
+    function openForm(p) {
+      editing = p || null;
+      $('dlg-title').textContent = p ? 'Editar item' : 'Novo item';
+      $('f-name').value = p?.name || '';
+      $('f-code').value = p?.code || '';
+      $('f-desc').value = p?.description || '';
+      $('f-stock').value = p?.stock ?? 0;
+      $('f-photo').value = '';
+      $('f-error').hidden = true;
+      setPreview(p?.image_url || null);
+      $('dlg').showModal();
+    }
+    function setPreview(src) { const i = $('f-preview'); i.hidden = !src; if (src) i.src = src; }
+
+    $('new').onclick = () => openForm(null);
+    $('cancel').onclick = () => $('dlg').close();
+    $('f-photo').addEventListener('change', () => {
+      const f = $('f-photo').files[0];
+      if (f) setPreview(URL.createObjectURL(f));
+    });
+
+    async function toJpeg(file, max = 900) {
+      const bmp = await createImageBitmap(file);
+      const r = Math.min(1, max / Math.max(bmp.width, bmp.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(bmp.width * r); c.height = Math.round(bmp.height * r);
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+      ctx.drawImage(bmp, 0, 0, c.width, c.height);
+      return new Promise((res) => c.toBlob(res, 'image/jpeg', 0.82));
+    }
+
+    $('item-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const err = $('f-error'); err.hidden = true;
+      const btn = $('save'); btn.disabled = true; btn.textContent = 'Salvando…';
+      try {
+        const row = {
+          name: $('f-name').value.trim(),
+          code: $('f-code').value.trim(),
+          description: $('f-desc').value.trim(),
+          stock: Math.max(0, parseInt($('f-stock').value, 10) || 0)
+        };
+        const file = $('f-photo').files[0];
+        let oldPath = null;
+        if (file) {
+          const blob = await toJpeg(file);
+          const path = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`;
+          const up = await sb.storage.from(BUCKET).upload(path, blob, { contentType: 'image/jpeg' });
+          if (up.error) throw up.error;
+          row.image_path = path;
+          row.image_url = sb.storage.from(BUCKET).getPublicUrl(path).data.publicUrl;
+          oldPath = editing?.image_path || null;
+        }
+        const q = editing ? sb.from('products').update(row).eq('id', editing.id) : sb.from('products').insert(row);
+        const { error } = await q;
+        if (error) {
+          if (file) await sb.storage.from(BUCKET).remove([row.image_path]);
+          throw error;
+        }
+        if (oldPath) await sb.storage.from(BUCKET).remove([oldPath]);
+        $('dlg').close(); await load(); toast('Item salvo');
+      } catch (ex) {
+        err.textContent = ex.code === '23505' ? 'Já existe um item com esse código.' : (ex.message || 'Não foi possível salvar.');
+        err.hidden = false;
+      } finally {
+        btn.disabled = false; btn.textContent = 'Salvar item';
+      }
+    });
+
+    sb.auth.onAuthStateChange((evt) => { if (evt === 'SIGNED_OUT') showBysession(); });
+    showBysession();
+  </script>
+</body>
+</html>
